@@ -2,7 +2,7 @@ mod results;
 
 use std::sync::atomic::AtomicBool;
 
-use crate::results::Results;
+use crate::results::{JsonResultState, JsonResults, Results};
 use anyhow::{bail, Context, Result};
 use async_std::io;
 use async_std::net::{
@@ -52,14 +52,17 @@ impl Config {
         self
     }
 
+    pub fn set_namespace(&mut self, namespace: String) -> &mut Self {
+        self.namespace = namespace;
+        self
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         let mut results = Results::new();
 
         results.prime(&self.addresses, self.tries).await;
 
         let results = Arc::new(results);
-
-        info!("primed results: {:?}", results);
 
         let mut workers = Vec::new();
         for address in &self.addresses {
@@ -70,37 +73,42 @@ impl Config {
                 .context("Failed to find target identifier")?;
 
             if tcp {
-                bail!("not yet implemented");
+                // TODO
+                bail!("TCP not yet implemented");
             } else {
                 workers.push(Self::run_udp_target(
                     address,
                     self.tries,
                     *identifier,
                     results.clone(),
+                    self.namespace.as_str(),
                 ));
-                trace!("created job for {}", address);
+                trace!(target: self.namespace.as_str(), "created job for {}", address);
             }
         }
 
         let future = futures::future::try_join_all(workers);
         //let (future, abortHandle) = futures::future::abortable(future);
 
-        if let Err(err) = if let Some(timeout) = self.timeout {
+        if let Err(e) = if let Some(timeout) = self.timeout {
             let timeouter = async {
                 async_std::task::sleep(std::time::Duration::from_secs(timeout as u64)).await;
-                bail!("Timeout over")
+                bail!("Time exceeded")
             };
 
             future.race(timeouter).await
         } else {
             future.await
         } {
-            warn!("")
+            warn!(target: self.namespace.as_str(), "Failed to run client: {:?}", e);
         }
 
         // TODO: error handling
         let results = Arc::try_unwrap(results).unwrap();
         let results = results.finish().await;
+
+        let num_failed = JsonResults::count_failed(&results);
+        info!(target: self.namespace.as_str(), "{} requests failed", num_failed);
 
         if let Some(output) = &self.output {
             let mut file = OpenOptions::new()
@@ -120,12 +128,12 @@ impl Config {
         Ok(())
     }
 
-    // FIXME: namespace
     async fn run_udp_target(
         target: &str,
         tries: usize,
         identifier: u64,
         results: Arc<Results<'_>>,
+        namespace: &str,
     ) -> Result<()> {
         let address = [
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
@@ -141,17 +149,17 @@ impl Config {
             loop {
                 let mut buf = [0u8; 1500];
                 read_half.recv(&mut buf).await;
-                trace!("got packet");
+                trace!(target: namespace, "got packet");
 
                 let udp = UdpEchoPacket::new(&buf).unwrap();
                 if identifier != udp.get_identifier() {
-                    warn!("invalid identifier in response");
+                    warn!(target: namespace, "invalid identifier in response");
                     continue;
                 }
 
                 let seq = udp.get_sequence();
                 if let Err(e) = write_results.recv_packet(identifier, seq).await {
-                    info!("failed to store result: {:?}", e);
+                    info!(target: namespace, "failed to store result: {:?}", e);
                 }
                 counter -= 1;
                 if counter == 0 {
@@ -167,8 +175,9 @@ impl Config {
                 let mut echo = MutableUdpEchoPacket::new(&mut buf).unwrap();
                 echo.populate(&payload);
 
-                results.start_packet(identifier, x as u64).await;
                 socket.send_to(&buf, target).await;
+                results.start_packet(identifier, x as u64).await;
+                trace!(target: namespace, "send packet {}:{}", identifier, x);
             }
         };
 

@@ -37,7 +37,7 @@ impl<'a> Results<'a> {
         }
     }
 
-    // TODO: create internal thread, so this is instant
+    // TODO: create internal thread, so this is instant/sync
     pub async fn recv_packet(&self, identifier: u64, seq: u64) -> Result<()> {
         let now = Instant::now();
         let mut cache = self.results.lock().await;
@@ -145,16 +145,29 @@ impl ResultsState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 pub enum JsonResultState {
     Succeded(Duration),
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 pub struct JsonResults<'a> {
     identifier: u64,
     sequence: u64,
     target: &'a str,
     state: JsonResultState,
+}
+
+impl<'a> JsonResults<'a> {
+    pub fn count_failed(results: &Vec<Self>) -> usize {
+        let mut ret = 0;
+
+        for entry in results {
+            if entry.state == JsonResultState::Failed {
+                ret += 1;
+            }
+        }
+        return ret;
+    }
 }
