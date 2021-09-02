@@ -8,6 +8,8 @@ use async_std::stream::IntoStream;
 use getopts::Options;
 use log::*;
 
+use server::Config;
+
 #[async_std::main]
 async fn main() {
     if let Err(e) = main_err().await {
@@ -16,6 +18,8 @@ async fn main() {
         std::process::exit(2);
     }
 }
+
+// TODO: sigint to stop server gracefully?
 async fn main_err() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -61,7 +65,6 @@ async fn main_err() -> Result<()> {
 
     //let addresses = match matches.opt_count("")
     let mut addresses = matches.opt_strs("a");
-    let mut socket_addresses = Vec::new();
 
     if addresses.len() == 0 {
         addresses.push("::".to_string());
@@ -69,57 +72,9 @@ async fn main_err() -> Result<()> {
         addresses.push("0.0.0.0".to_string());
     }
 
-    for address in addresses {
-        info!("Listening on '[{}]:{}'", address, port);
-        let socket_addr = (address.as_str(), port)
-            .to_socket_addrs()
-            .await
-            .context("Failed to parse soket address")?
-            .collect::<Vec<SocketAddr>>();
-        socket_addresses.push(socket_addr);
-    }
-
-    let socket_addresses = socket_addresses.concat();
-
     let tcp = matches.opt_present("t");
 
-    if tcp {
-        let socket = TcpListener::bind(&*socket_addresses)
-            .await
-            .context("Failed to open TCP socket")?;
+    let mut config = Config::new(port, addresses, tcp);
 
-        let mut incoming = socket.incoming();
-
-        while let Some(Ok(stream)) = incoming.next().await {
-            async_std::task::spawn(async {
-                let _ = handle_tcp(stream).await;
-            });
-        }
-    } else {
-        let socket = UdpSocket::bind(&*socket_addresses)
-            .await
-            .context("Failed to open Udp Socket")?;
-
-        let mut buf = [0u8; 1500];
-
-        while let Ok((size, addr)) = socket.recv_from(&mut buf).await {
-            debug_assert!(size <= 1500);
-            let _ = socket.send_to(&buf[..size], addr).await;
-
-            buf.fill(0);
-            // SAFETY: buf is valid for size bytes
-            //unsafe { libc::memset(buf.as_ptr() as *mut libc::c_void, 0, size) };
-        }
-    }
-
-    unreachable!("After loop");
-}
-
-async fn handle_tcp(stream: TcpStream) -> io::Result<()> {
-    let mut reader = stream.clone();
-    let mut writer = stream;
-
-    io::copy(&mut reader, &mut writer).await?;
-
-    Ok(())
+    config.run().await
 }
