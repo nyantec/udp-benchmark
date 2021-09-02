@@ -1,7 +1,8 @@
-use pnet_macros::Packet;
+use pnet_macros::packet;
 use pnet_macros_support::types::u64be;
 
-#[derive(Packet)]
+//#[derive(Packet)]
+#[packet]
 pub struct UdpEcho {
     // Generic identifier, should be different for every client
     pub identifier: u64be,
