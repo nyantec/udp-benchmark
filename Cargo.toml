@@ -3,5 +3,6 @@
 members = [
     "packet",
     "server",
-    "client"
+    "client",
+    "manager"
 ]

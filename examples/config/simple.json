@@ -1,0 +1,8 @@
+{
+  "containers": {
+    "test": {},
+    "client": {
+      "output_type": "client"
+    }
+  }
+}
