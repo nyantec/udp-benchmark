@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::sync::Mutex;
 
 use crate::config::{Container, OutputFormat};
 use anyhow::{bail, Context, Result};
 use log::*;
+use nix::sys::signal::{kill, Signal};
 use nix::sys::wait;
-use nix::sys::wait::WaitStatus;
+use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
 use nix::{sched, unistd};
 
@@ -18,6 +19,7 @@ const STACK_SIZE: usize = 1024 * 1024;
 pub struct ContainerManager {
     containers: HashMap<String, Container>,
     pids: HashMap<Pid, String>,
+    router_pids: HashMap<Pid, String>,
     output: HashMap<String, File>,
 }
 
@@ -26,16 +28,17 @@ impl ContainerManager {
         Ok(Self {
             containers: HashMap::new(),
             pids: HashMap::new(),
+            router_pids: HashMap::new(),
             output: HashMap::new(),
         })
     }
 
-    pub fn create_container(&mut self, name: &str, config: &Container) -> Result<()> {
+    pub async fn create_container(&mut self, name: &str, config: &Container) -> Result<()> {
         self.containers.insert(name.to_owned(), config.to_owned());
         debug!("creating container {}", name);
         // TODO: add output temp file
         let output_file = match config.output_type {
-            OutputFormat::None => None,
+            OutputFormat::None | OutputFormat::Router => None,
             _ => Some(
                 OpenOptions::new()
                     .custom_flags(libc::O_TMPFILE)
@@ -64,21 +67,30 @@ impl ContainerManager {
             sched::CloneFlags::CLONE_NEWCGROUP
                 | sched::CloneFlags::CLONE_NEWNET
                 | sched::CloneFlags::CLONE_NEWUTS,
-            None,
+            Some(nix::sys::signal::Signal::SIGCHLD as i32),
         )
         .context("Failed to clone")?;
 
-        self.store_pid(name.to_owned(), pid)?;
+        if let Some(pid) = match config.output_type {
+            OutputFormat::Router | OutputFormat::RouterLogging => {
+                self.router_pids.insert(pid, name.to_owned())
+            }
+            _ => self.pids.insert(pid, name.to_owned()),
+        } {
+            warn!("A pid for '{}' was already stored", name);
+        }
         output_file.map(|f| self.output.insert(name.to_owned(), f));
 
         Ok(())
     }
 
     // TODO: result type
-    pub fn wait(&mut self) -> Result<HashMap<String, ()>> {
+    pub fn wait(&mut self) -> Result<HashMap<String, Option<File>>> {
         let mut res = HashMap::new();
+        // TODO: async with waiter
         while self.has_childs() {
             debug!("pids: {:?}", self.pids);
+            debug!("routers: {:?}", self.router_pids);
             match wait::waitpid(Pid::from_raw(-1), Some(wait::WaitPidFlag::WUNTRACED))
                 .context("Failed to wait on pids")?
             {
@@ -87,10 +99,14 @@ impl ContainerManager {
                         Some(name) => name,
                         None => {
                             info!("Pid {} is not an container", pid);
+
+                            if let Some(name) = self.router_pids.remove(&pid) {
+                                warn!("Router '{}' exited without reqesting it", name);
+                            }
                             continue;
                         }
                     };
-                    debug!("{} stopped with code {}", name, status);
+                    debug!("'{}' stopped with code {}", name, status);
                     let config = match self.containers.get(&name) {
                         Some(v) => v,
                         None => {
@@ -99,12 +115,23 @@ impl ContainerManager {
                         }
                     };
 
-                    res.insert(name.to_owned(), ());
+                    res.insert(name.to_owned(), self.output.remove(&name));
                 }
                 //WaitStatus::Signaled(_, _, _) => {}
                 //WaitStatus::Stopped(_, _) => {}
                 v => bail!("Pid status {:?} was not expected", v),
             }
+        }
+
+        // Stop router threads
+        for (pid, name) in &self.router_pids {
+            info!("Killing router '{}'", name);
+
+            kill(*pid, Signal::SIGINT)
+                .with_context(|| format!("Failed to send SIGINT to '{}'", name));
+
+            waitpid(*pid, None).context("Failed to wait on child");
+            res.insert(name.to_owned(), self.output.remove(name));
         }
 
         return Ok(res);
@@ -134,10 +161,17 @@ fn main_child(name: &str, config: &Container, fd: &Option<RawFd>) -> isize {
         let mut file = unsafe { File::from_raw_fd(*fd) };
         file.write(format!("testing for {}", name).as_bytes())
             .unwrap();
+        info!("wrote into file for {}", name);
+        //file.into_raw_fd();
         std::mem::forget(file);
     }
 
-    nix::unistd::sleep(20);
+    if config.output_type == OutputFormat::Router
+        || config.output_type == OutputFormat::RouterLogging
+    {
+        nix::unistd::sleep(60);
+    };
+    nix::unistd::sleep(2);
 
     return 0;
 }

@@ -7,15 +7,16 @@ use getopts::Options;
 use log::*;
 use manager::Config;
 
-fn main() {
-    if let Err(e) = main_err() {
+#[async_std::main]
+async fn main() {
+    if let Err(e) = main_err().await {
         eprintln!("Error:");
         eprintln!("{:?}", e);
         std::process::exit(2);
     }
 }
 
-fn main_err() -> Result<()> {
+async fn main_err() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let mut options = Options::new();
@@ -52,7 +53,7 @@ fn main_err() -> Result<()> {
 
     let config = Config::from_file(configFile).context("Failed to build config")?;
 
-    config.run()?;
+    config.run().await?;
 
     Ok(())
 }

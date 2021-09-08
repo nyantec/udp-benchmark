@@ -3,6 +3,9 @@
     "test": {},
     "client": {
       "output_type": "client"
+    },
+    "router": {
+      "output_type": "router_logging"
     }
   }
 }

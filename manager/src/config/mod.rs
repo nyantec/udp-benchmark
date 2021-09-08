@@ -9,12 +9,22 @@ use log::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
     /// No output of the unit is expected
     None,
+
+    /// Client json is expected in the output file
     Client,
+
+    /// Output is parsed as literal string
     Passthrough,
+
+    /// This is just a router, and will not exit on its own
+    Router,
+
+    /// THis is a router which writes a log file, represented as raw string
+    RouterLogging,
 }
 
 impl Default for OutputFormat {
@@ -44,18 +54,29 @@ impl Config {
         Ok(serde_json::from_reader(&mut file).context("Failed to parse config")?)
     }
 
-    pub fn run(self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         let mut manager = ContainerManager::new().context("Failed to create manager")?;
 
         for (name, config) in &self.containers {
             manager
                 .create_container(name, config)
+                .await
                 .with_context(|| format!("Failed to create container {}", name))?;
         }
 
         let res = manager.wait()?;
 
         info!("res: {:?}", res);
+
+        for (name, mut file) in res {
+            if let Some(file) = file {
+                let mut file: File = file;
+                let mut buf = String::new();
+                file.read_to_string(&mut buf);
+                info!("{}: {}", name, buf);
+            }
+        }
+
         /*nix::unistd::sleep(40);
 
         for (name, file) in manager.get_files() {
