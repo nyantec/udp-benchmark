@@ -39,6 +39,22 @@ pub struct Container {
     pub output_type: OutputFormat,
 }
 
+impl Container {
+    pub fn is_router(&self) -> bool {
+        match self.output_type {
+            OutputFormat::Router | OutputFormat::RouterLogging => true,
+            _ => false,
+        }
+    }
+
+    pub fn has_file(&self) -> bool {
+        match self.output_type {
+            OutputFormat::Client | OutputFormat::Passthrough | OutputFormat::RouterLogging => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub containers: HashMap<String, Container>,
@@ -55,6 +71,7 @@ impl Config {
     }
 
     pub async fn run(self) -> Result<()> {
+        // setup ContainerManager
         let mut manager = ContainerManager::new().context("Failed to create manager")?;
 
         for (name, config) in &self.containers {
@@ -64,7 +81,15 @@ impl Config {
                 .with_context(|| format!("Failed to create container {}", name))?;
         }
 
-        let res = manager.wait()?;
+        // Start Childs
+        // TODO: already run wait while starting, to not deadlock on fast exiting processes
+        //async_std::task::spawn(manager.start_childs());
+        manager.start_childs().await;
+
+        let res = manager.wait().await?;
+        // Finish
+
+        /*let res = manager.wait().await?;
 
         info!("res: {:?}", res);
 
@@ -75,7 +100,7 @@ impl Config {
                 file.read_to_string(&mut buf);
                 info!("{}: {}", name, buf);
             }
-        }
+        }*/
 
         /*nix::unistd::sleep(40);
 
